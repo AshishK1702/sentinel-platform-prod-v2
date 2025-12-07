@@ -37,6 +37,10 @@ const auth = getAuth(app);
 const db = getFirestore(app);
 const appId = "production-v1"; 
 
+// Base URL for backend API (local/dev falls back to localhost)
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000';
+
+
 // --- PERFORMANCE CONSTANTS ---
 // Limit the number of records displayed in the tables/terminal for virtualization effect.
 const DISPLAY_LOGS_LIMIT = 1000; // Increased limit per user request for visible filtered data
@@ -344,7 +348,7 @@ export default function App() {
                         const lastLog = logs.length > 0 ? logs[logs.length - 1] : null;
                         const lastTimestamp = lastLog ? lastLog.timestamp : null;
 
-                        const response = await fetch('http://localhost:5000/api/connect-db', {
+                        const response = await fetch(`${API_BASE_URL}/api/connect-db`, {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify({ ...activeConnection, last_timestamp: lastTimestamp })
@@ -739,7 +743,7 @@ const DBConnectors = ({ onConnectionEstablished, onDisconnect, activeConnection 
         e.preventDefault();
         setLoading(true);
         try {
-            const response = await fetch('http://localhost:5000/api/connect-db', {
+            const response = await fetch(`${API_BASE_URL}/api/connect-db`, {
                 method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(formData)
             });
             const data = await response.json();
@@ -929,7 +933,7 @@ const Dashboard = ({ logs, user, handleTriageLog }) => {
         
         try {
             await addDoc(getUserRulesCollectionRef(user.uid), { name: `Manual Block ${log.ip}`, conditionField: 'ip', conditionValue: log.ip, action: 'BLOCK_IP' });
-            const response = await fetch('http://localhost:5000/api/block-ip', {
+            const response = await fetch(`${API_BASE_URL}/api/block-ip`, {
                 method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ip: log.ip })
             });
             const result = await response.json();
