@@ -37,13 +37,10 @@ const auth = getAuth(app);
 const db = getFirestore(app);
 const appId = "production-v1"; 
 
-// Base URL for backend API (local/dev falls back to localhost)
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000';
-
-
 // --- PERFORMANCE CONSTANTS ---
-// Limit the number of records displayed in the tables/terminal for virtualization effect.
-const DISPLAY_LOGS_LIMIT = 1000; // Increased limit per user request for visible filtered data
+// This limits rendering on the dashboard/terminal to prevent browser hang, 
+// but ALL logs are loaded into memory for analysis.
+const DISPLAY_LOGS_LIMIT = 500; 
 // --- END PERFORMANCE CONSTANTS ---
 
 // Firestore paths
@@ -213,27 +210,12 @@ const calculateAnalytics = (logs) => {
         { subject: 'PII', A: (gdprCount + pciCount) * 5 || 5, fullMark: 100 },
     ];
 
-    // Filter all risky IPs that need explicit blocking/investigation
-    const ipsNeedingAction = allRiskyAssets.filter(a => a.score >= 5).length;
-    
-    // Triage Status Chart Data
-    const triageData = Object.entries(logs.reduce((acc, l) => {
-        const statusKey = l.status.split(' - ')[0] || l.status; // Group closed items
-        acc[statusKey] = (acc[statusKey] || 0) + 1;
-        return acc;
-    }, { New: 0, Investigating: 0, Blocked: 0, 'Closed - Fixed': 0, 'Closed - Benign': 0 })).map(([name, count]) => ({
-        name,
-        count
-    }));
-
 
     return { 
         total, critical, high, medium, low, complianceScore, velocity, mttdMinutes: 12, 
         heatmapData, topIPs: topIPsChart, complianceTimeline, pieData, logTrend, riskRadarData,
         topRiskyAssets: top5RiskyAssets, 
         allRiskyAssets: allRiskyAssets, // EXPOSED FOR REPORTING
-        ipsNeedingAction: ipsNeedingAction, // NEW KPI
-        triageData, // NEW CHART DATA
         // ENHANCEMENT: Add simulated geolocation data
         geoLocations: top5RiskyAssets.map(i => { // Only top 5 IPs used for map visualization efficiency
             const geo = getSimulatedGeolocation(i.ip);
@@ -348,7 +330,7 @@ export default function App() {
                         const lastLog = logs.length > 0 ? logs[logs.length - 1] : null;
                         const lastTimestamp = lastLog ? lastLog.timestamp : null;
 
-                        const response = await fetch(`${API_BASE_URL}/api/connect-db`, {
+                        const response = await fetch('http://localhost:5000/api/connect-db', {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify({ ...activeConnection, last_timestamp: lastTimestamp })
@@ -676,6 +658,16 @@ const AuthScreen = () => {
                 {error && <div className="bg-red-500/20 border border-red-500/50 text-red-300 p-3 rounded mb-4 text-xs font-mono">{error}</div>}
                 {message && <div className="bg-green-500/20 border border-green-500/50 text-green-300 p-3 rounded mb-4 text-xs font-mono">{message}</div>}
                 <form onSubmit={handleSubmit} className="space-y-4">
+                    {authMode === 'register' && (
+                        <>
+                            <div className="grid grid-cols-2 gap-4">
+                                <input name="fullName" required placeholder="Name" className="bg-slate-900 border border-slate-700 rounded p-2 text-sm text-white w-full" onChange={handleChange} />
+                                <input name="role" required placeholder="Role" className="bg-slate-900 border border-slate-700 rounded p-2 text-sm text-white w-full" onChange={handleChange} />
+                            </div>
+                            <input name="company" required placeholder="Company" className="bg-slate-900 border border-slate-700 rounded p-2 text-sm text-white w-full" onChange={handleChange} />
+                        </>
+                    )}
+                    <input type="email" name="email" required placeholder="Email" className="bg-slate-900 border border-slate-700 rounded p-2 text-sm text-white w-full" onChange={handleChange} />
                     {authMode !== 'forgot' && <input type="password" name="password" required placeholder="Password" className="bg-slate-900 border border-slate-700 rounded p-2 text-sm text-white w-full" onChange={handleChange} />}
                     <button className="w-full bg-cyan-600 hover:bg-cyan-500 text-white font-bold py-2 rounded uppercase text-sm">Submit</button>
                 </form>
@@ -743,7 +735,7 @@ const DBConnectors = ({ onConnectionEstablished, onDisconnect, activeConnection 
         e.preventDefault();
         setLoading(true);
         try {
-            const response = await fetch(`${API_BASE_URL}/api/connect-db`, {
+            const response = await fetch('http://localhost:5000/api/connect-db', {
                 method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(formData)
             });
             const data = await response.json();
@@ -858,82 +850,56 @@ const StatusButton = ({ logId, currentStatus, onTriage }) => {
 };
 
 const Dashboard = ({ logs, user, handleTriageLog }) => {
-    // New State for Display Toggle and Date Filtering
-    const [showAllLogs, setShowAllLogs] = useState(false); 
-    const [logStatusFilter, setLogStatusFilter] = useState('New'); 
+    // New State for Filtering
+    const [logStatusFilter, setLogStatusFilter] = useState('New'); // Default filter to 'New'
     const [searchTerm, setSearchTerm] = useState('');
-    const [startDate, setStartDate] = useState('');
-    const [endDate, setEndDate] = useState('');
 
     const filteredLogs = useMemo(() => {
         let filtered = logs;
         
-        // --- 1. Date Range Filter ---
-        if (startDate || endDate) {
-            const startTimestamp = startDate ? new Date(startDate).getTime() : 0;
-            const endTimestamp = endDate ? new Date(endDate).getTime() : Infinity;
-
-            if (!isNaN(startTimestamp) && !isNaN(endTimestamp)) {
-                 filtered = filtered.filter(log => {
-                    const logTime = new Date(log.timestamp).getTime();
-                    return logTime >= startTimestamp && logTime <= endTimestamp;
-                });
-            }
-        }
-
-        // --- 2. Status Filter ---
+        // 1. Status Filter
         if (logStatusFilter !== 'All') {
             filtered = filtered.filter(log => log.status === logStatusFilter);
         }
 
-        // --- 3. Search Filter ---
+        // 2. Search Filter
         if (searchTerm) {
             const lowerCaseSearch = searchTerm.toLowerCase();
             filtered = filtered.filter(log => 
-                log.raw?.toLowerCase().includes(lowerCaseSearch) || 
+                log.raw?.toLowerCase().includes(lowerCaseSearch) || // Use optional chaining for raw access
                 log.type.toLowerCase().includes(lowerCaseSearch) ||
                 log.ip.includes(lowerCaseSearch)
             );
         }
 
-        // 4. Performance/Display Toggle: Only apply limit if showAllLogs is false
-        const finalLogs = filtered.slice().reverse(); // Sort descending (latest first)
-        
-        if (!showAllLogs && finalLogs.length > DISPLAY_LOGS_LIMIT) {
-             return finalLogs.slice(0, DISPLAY_LOGS_LIMIT);
-        }
-
-        return finalLogs;
-
-    }, [logs, logStatusFilter, searchTerm, showAllLogs, startDate, endDate]);
+        // 3. Performance/Display Limit
+        // We only show the latest 500 logs that match the current filter criteria
+        // Sort by timestamp descending (latest first) and take the top DISPLAY_LOGS_LIMIT
+        return filtered.slice().reverse().slice(0, DISPLAY_LOGS_LIMIT);
+    }, [logs, logStatusFilter, searchTerm]);
 
     // Recalculate stats based on ALL logs (not filtered logs)
     const stats = useMemo(() => calculateAnalytics(logs), [logs]);
     const COLORS = ['#06b6d4', '#ef4444', '#f59e0b', '#10b981', '#6366f1'];
     const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-    
-    // Triage Chart Color mapping
-    const triageBarColors = {
-        'New': '#0ea5e9',
-        'Investigating': '#eab308',
-        'Blocked': '#ef4444',
-        'Closed - Fixed': '#10b981',
-        'Closed - Benign': '#34d399',
-    };
 
     const handleFalsePositive = async (logId) => {
         if (!user) return;
+        // Triage is handled by handleTriageLog now, which updates Firestore
         handleTriageLog(logId, 'Closed - Benign');
     };
 
     const handleBlockIP = async (log) => {
         if (!user) return;
         
+        // 1. Triage log status to 'Blocked' in Firestore
         handleTriageLog(log.id, 'Blocked'); 
         
         try {
+            // 2. Rule persistence simulation
             await addDoc(getUserRulesCollectionRef(user.uid), { name: `Manual Block ${log.ip}`, conditionField: 'ip', conditionValue: log.ip, action: 'BLOCK_IP' });
-            const response = await fetch(`${API_BASE_URL}/api/block-ip`, {
+            // 3. External Firewall API simulation
+            const response = await fetch('http://localhost:5000/api/block-ip', {
                 method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ip: log.ip })
             });
             const result = await response.json();
@@ -954,63 +920,52 @@ const Dashboard = ({ logs, user, handleTriageLog }) => {
 
     return (
         <div className="space-y-6">
-            {/* KPI Cards */}
             <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-5 gap-4">
+                {/* CRITICAL FIX: stats.total now reflects ALL data in Firestore */}
                 <Card className="border-t-4 border-t-cyan-500"><div className="text-slate-400 text-xs uppercase tracking-widest font-bold mb-2">Total Analyzed</div><div className="text-3xl font-mono text-white">{stats.total}</div></Card>
                 <Card className="border-t-4 border-t-purple-500"><div className="text-purple-400 text-xs uppercase tracking-widest font-bold mb-2">Risk Velocity</div><div className="flex items-end justify-between"><div className="text-3xl font-mono text-white">{stats.velocity > 0 ? '+' : ''}{stats.velocity.toFixed(0)}%</div>{stats.velocity > 0 ? <TrendingUp className="w-6 h-6 text-red-500 mb-1" /> : <TrendingDown className="w-6 h-6 text-green-500 mb-1" />}</div></Card>
                 <Card className="border-t-4 border-t-pink-500"><div className="text-pink-400 text-xs uppercase tracking-widest font-bold mb-2">MTTD</div><div className="flex items-end justify-between"><div className="text-3xl font-mono text-white">{stats.mttdMinutes}<span className="text-sm text-slate-500 ml-1">min</span></div><Clock className="w-6 h-6 text-pink-500 mb-1" /></div></Card>
                 <Card className="border-t-4 border-t-emerald-500"><div className="text-emerald-400 text-xs uppercase tracking-widest font-bold mb-2">Compliance</div><div className="flex items-end justify-between"><div className="text-3xl font-mono text-white">{stats.complianceScore}%</div><CheckSquare className="w-6 h-6 text-emerald-500 mb-1" /></div></Card>
-                <Card className="border-t-4 border-t-red-500"><div className="text-red-400 text-xs uppercase tracking-widest font-bold mb-2">Risky IPs Action</div><div className="flex items-end justify-between"><div className="text-3xl font-mono text-white">{stats.ipsNeedingAction}</div><AlertTriangle className="w-6 h-6 text-red-500 mb-1" /></div></Card>
+                <Card className="border-t-4 border-t-yellow-500"><div className="text-yellow-400 text-xs uppercase tracking-widest font-bold mb-2">False Positives</div><div className="flex items-end justify-between"><div className="text-3xl font-mono text-white">{stats.fpr.toFixed(1)}%</div><ThumbsUp className="w-6 h-6 text-yellow-500 mb-1" /></div></Card>
             </div>
 
-            {/* Visualizations - Row 1 */}
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
                 <Card className="lg:col-span-1"><h3 className="text-white font-bold mb-4 flex items-center gap-2"><Server className="w-4 h-4 text-red-400"/> Risky Assets (Top 5)</h3><div className="space-y-3">{stats.topRiskyAssets.length > 0 ? stats.topRiskyAssets.map(asset => (<div key={asset.ip} className="flex items-center justify-between p-2 bg-slate-800/50 rounded border border-slate-700"><div><div className="font-mono text-sm text-white">{asset.ip}</div><div className="text-[10px] text-slate-500 flex gap-2"><span className="text-red-400">{asset.critical} Crit</span><span className="text-orange-400">{asset.high} High</span></div></div><div className="text-right"><div className="text-xl font-bold text-red-500">{asset.score}</div><div className="text-[10px] uppercase text-slate-600">Risk Score</div></div></div>)) : <div className="text-slate-500 text-sm italic">No risky assets detected.</div>}</div></Card>
+                {/* ENHANCEMENT: Map given slightly more height for better visualization */}
                 <Card className="lg:col-span-2 h-[400px]"><h3 className="text-white font-bold mb-4 flex items-center gap-2"><Map className="w-4 h-4 text-cyan-400"/> Global Threat Origins (Simulated)</h3><WorldMap locations={stats.geoLocations} /></Card>
             </div>
 
-            {/* Visualizations - Row 2 (Charts) */}
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-                 {/* New Triage Status Bar Chart */}
-                <Card className="lg:col-span-1 h-80">
-                    <h3 className="text-white font-bold mb-4 flex items-center gap-2"><Briefcase className="w-4 h-4 text-emerald-400"/> Current Triage Workload</h3>
-                    
+            {/* CHART ROW */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                <Card className="h-80">
+                    <h3 className="text-white font-bold mb-4 flex items-center gap-2"><Calendar className="w-4 h-4 text-yellow-400"/> Compliance Violation Timeline & Forecast</h3>
                     <ResponsiveContainer width="100%" height="90%">
-                        <BarChart data={stats.triageData} margin={{ top: 5, right: 0, left: -20, bottom: 5 }}>
-                            <CartesianGrid strokeDasharray="3 3" stroke="#334155" vertical={false} />
-                            <XAxis dataKey="name" stroke="#94a3b8" tick={{ fontSize: 10 }} angle={-30} textAnchor="end" height={40} />
+                        <LineChart data={stats.complianceTimeline} margin={{ top: 5, right: 20, left: -20, bottom: 5 }}>
+                            <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
+                            <XAxis dataKey="date" stroke="#94a3b8" tick={{ fontSize: 10 }} />
                             <YAxis stroke="#94a3b8" />
                             <Tooltip contentStyle={{ backgroundColor: '#0f172a', borderColor: '#334155' }} itemStyle={{ color: '#fff' }} />
-                            <Bar dataKey="count" name="Alert Count" radius={[4, 4, 0, 0]}>
-                                {stats.triageData.map((entry, index) => (
-                                    <Cell key={`cell-${index}`} fill={triageBarColors[entry.name] || '#64748b'} />
-                                ))}
-                            </Bar>
-                        </BarChart>
+                            <Legend />
+                            <Line type="monotone" dataKey="gdpr" name="GDPR PII (Actual)" stroke="#06b6d4" strokeWidth={2} dot={false} />
+                            <Line type="monotone" dataKey="pci" name="PCI-DSS Leakage (Actual)" stroke="#f97316" strokeWidth={2} dot={false} />
+                        </LineChart>
                     </ResponsiveContainer>
                 </Card>
-
-                {/* Compliance/Ingestion Trends */}
-                <Card className="lg:col-span-2 h-80">
-                    <h3 className="text-white font-bold mb-4 flex items-center gap-2"><BarChart3 className="w-4 h-4 text-purple-400"/> Log & Compliance Trends</h3>
-                    
+                <Card className="h-80">
+                    <h3 className="text-white font-bold mb-4 flex items-center gap-2"><BarChart3 className="w-4 h-4 text-purple-400"/> Log Ingestion Trend (Total Events)</h3>
                     <ResponsiveContainer width="100%" height="90%">
                         <LineChart data={stats.logTrend} margin={{ top: 5, right: 20, left: -20, bottom: 5 }}>
                             <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
                             <XAxis dataKey="date" stroke="#94a3b8" tick={{ fontSize: 10 }} />
-                            <YAxis yAxisId="left" stroke="#94a3b8" />
-                            <YAxis yAxisId="right" orientation="right" stroke="#f97316" />
+                            <YAxis stroke="#94a3b8" />
                             <Tooltip contentStyle={{ backgroundColor: '#0f172a', borderColor: '#334155' }} itemStyle={{ color: '#fff' }} />
                             <Legend />
-                            <Line yAxisId="left" type="monotone" dataKey="total" name="Total Logs Ingested" stroke="#a78bfa" strokeWidth={2} dot={false} />
-                            <Line yAxisId="right" type="monotone" dataKey="gdpr" name="GDPR Violations" stroke="#06b6d4" strokeWidth={1} dot={false} strokeDasharray="5 5" />
-                            <Line yAxisId="right" type="monotone" dataKey="pci" name="PCI Violations" stroke="#f97316" strokeWidth={1} dot={false} strokeDasharray="3 3" />
+                            <Line type="monotone" dataKey="total" name="Total Logs Ingested" stroke="#a78bfa" strokeWidth={2} dot={false} />
                         </LineChart>
                     </ResponsiveContainer>
                 </Card>
             </div>
             
-            {/* Visualizations - Row 3 (Distribution) */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 <Card className="h-80">
                     <h3 className="text-white font-bold mb-4 flex items-center gap-2"><Activity className="w-4 h-4 text-cyan-400"/> Threat Distribution</h3>
@@ -1037,13 +992,11 @@ const Dashboard = ({ logs, user, handleTriageLog }) => {
                 </Card>
             </div>
 
-
             <Card>
                 <h3 className="text-white font-bold mb-4">Recent Alerts & Remediation</h3>
                 
-                {/* Triage/Filter/Search Bar */}
+                {/* New Triage/Filter/Search Bar */}
                 <div className="flex flex-col md:flex-row justify-between items-center mb-4 gap-3">
-                    {/* Status Filters */}
                     <div className="flex space-x-2 overflow-x-auto pb-1">
                         {Object.keys(LOG_STATUSES).concat(['All']).map(status => (
                             <button 
@@ -1060,25 +1013,6 @@ const Dashboard = ({ logs, user, handleTriageLog }) => {
                         ))}
                     </div>
                     
-                    {/* Date Filters */}
-                    <div className="flex gap-2 w-full md:w-auto">
-                        <input 
-                            type="date"
-                            placeholder="Start Date"
-                            value={startDate}
-                            onChange={(e) => setStartDate(e.target.value)}
-                            className="bg-slate-900 border border-slate-700 rounded-lg py-2 px-3 text-sm text-white focus:ring-cyan-500 focus:border-cyan-500 w-full"
-                        />
-                         <input 
-                            type="date"
-                            placeholder="End Date"
-                            value={endDate}
-                            onChange={(e) => setEndDate(e.target.value)}
-                            className="bg-slate-900 border border-slate-700 rounded-lg py-2 px-3 text-sm text-white focus:ring-cyan-500 focus:border-cyan-500 w-full"
-                        />
-                    </div>
-                    
-                    {/* Search Bar */}
                     <div className="relative w-full md:w-64">
                         <Search className="w-4 h-4 text-slate-500 absolute left-3 top-1/2 transform -translate-y-1/2" />
                         <input 
@@ -1092,20 +1026,8 @@ const Dashboard = ({ logs, user, handleTriageLog }) => {
                 </div>
 
                 <div className="overflow-x-auto">
-                    <p className={`text-xs mb-2 p-2 rounded flex items-center justify-between ${showAllLogs ? 'bg-red-900/10 border border-red-500/30 text-red-400' : 'bg-yellow-900/10 border border-yellow-500/30 text-yellow-400'}`}>
-                        <span>
-                            Analyzing **{logs.length}** total logs in database. 
-                            Displaying **{filteredLogs.length}** {showAllLogs ? ' filtered records (Caution: Performance risk).' : ` most recent filtered records for stability.`}
-                        </span>
-                        {/* The logic below handles the performance toggle */}
-                        {(logs.length > DISPLAY_LOGS_LIMIT || filteredLogs.length > DISPLAY_LOGS_LIMIT) && (
-                            <button 
-                                onClick={() => setShowAllLogs(!showAllLogs)}
-                                className={`ml-4 text-xs font-bold px-2 py-0.5 rounded transition-colors ${showAllLogs ? 'bg-red-500 hover:bg-red-600 text-white' : 'bg-yellow-600 hover:bg-yellow-700 text-white'}`}
-                            >
-                                {showAllLogs ? 'Re-limit View' : `View All (${filteredLogs.length} Records)`}
-                            </button>
-                        )}
+                    <p className="text-yellow-400 text-xs mb-2 p-2 bg-yellow-900/10 border border-yellow-500/30 rounded">
+                        Performance Notice: Analyzing **{logs.length}** total logs in database. Displaying only the **{filteredLogs.length}** most recent filtered records for browser stability.
                     </p>
                     <table className="w-full text-sm text-left text-slate-400">
                         <thead className="text-xs text-slate-500 uppercase bg-slate-800/50">
@@ -1119,7 +1041,7 @@ const Dashboard = ({ logs, user, handleTriageLog }) => {
                             </tr>
                         </thead>
                         <tbody>
-                            {/* filteredLogs is already reversed (latest first) and limited by useMemo */}
+                            {/* filteredLogs is already reversed (latest first) and limited to DISPLAY_LOGS_LIMIT by useMemo */}
                             {filteredLogs.map(log => ( 
                                 <tr key={log.id} className={`border-b border-slate-800 hover:bg-slate-800/30 ${log.status === 'Blocked' ? 'opacity-50' : ''}`}>
                                     <td className="px-4 py-3 font-mono text-xs">{new Date(log.timestamp).toLocaleTimeString()}</td>
@@ -1151,47 +1073,37 @@ const ReportCenter = ({ logs, userProfile }) => {
     const stats = useMemo(() => calculateAnalytics(logs), [logs]);
     const aiAnalysis = useMemo(() => generateAIAnalysis(logs), [logs]);
 
-    // NEW: Function to handle Excel-compatible TSV export (using .csv extension for better compatibility)
+    // NEW: Function to handle Excel-compatible CSV export
     const handleExcelExport = () => {
-        const separator = '\t'; // Tab separator for Excel compatibility
-        
         // Define column headers
         const headers = ["ID", "Timestamp", "Severity", "Threat Type", "IP Address", "Compliance Tags", "Raw Log", "Status"];
         
-        // Map log data to TSV rows
-        const tsvRows = logs.map(log => {
-            // Escape double quotes and remove newlines from raw log data
-            const sanitizedRawLog = log.raw
-                .replace(/"/g, '""')
-                .replace(/\n/g, ' ')
-                .replace(/\r/g, ''); 
-            
-            return [
-                log.id,
-                new Date(log.timestamp).toISOString(),
-                log.severity,
-                log.type,
-                log.ip,
-                log.compliance.join('; '),
-                `"${sanitizedRawLog}"`, // Enclose raw log in quotes
-                log.status
-            ].join(separator);
-        });
+        // Map log data to CSV rows
+        const csvRows = logs.map(log => [
+            log.id,
+            new Date(log.timestamp).toISOString(),
+            log.severity,
+            log.type,
+            log.ip,
+            log.compliance.join('; '),
+            `"${log.raw.replace(/"/g, '""')}"`, // Handle quotes in raw log data
+            log.status
+        ].join(','));
         
         // Combine headers and rows
-        const tsvContent = [
-            headers.join(separator),
-            ...tsvRows
+        const csvContent = [
+            headers.join(','),
+            ...csvRows
         ].join('\n');
 
-        // Use 'text/tsv' MIME type and the .csv extension
-        const blob = new Blob([tsvContent], { type: 'text/tsv;charset=utf-8;' });
+        // Create a Blob and trigger download. Use .xlsx in the filename to suggest the file opens directly in Excel, although the content is CSV/TSV
+        const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
         const url = URL.createObjectURL(blob);
         const link = document.createElement('a');
         
         link.setAttribute('href', url);
-        // Using .csv extension for reliable parsing by Excel, even though the data is TSV
-        link.setAttribute('download', `Sentinel_Export_${new Date().toISOString().split('T')[0]}.csv`); 
+        // Using .xlsx extension tells the browser/OS to try opening it with Excel
+        link.setAttribute('download', `Sentinel_Export_${new Date().toISOString().split('T')[0]}.xlsx`); 
         document.body.appendChild(link);
         link.click();
         document.body.removeChild(link);
@@ -1270,7 +1182,7 @@ const ReportCenter = ({ logs, userProfile }) => {
                         <div class="meta-box">
                             <strong>REPORT GENERATED</strong><br>${date}<br>
                             Analyst: ${userProfile?.fullName || 'N/A'}<br><br>
-                            <strong>TOTAL LOGS ANALYZED:</strong> ${stats.total}<br>
+                            <strong>TARGET ORGANIZATION</strong><br>${userProfile?.company || 'ACME Corp'}<br>
                             <strong>CLASSIFICATION</strong><br>INTERNAL USE ONLY
                         </div>
                     </div>
@@ -1286,7 +1198,7 @@ const ReportCenter = ({ logs, userProfile }) => {
                     <div class="dashboard-grid">
                         <div class="kpi-card" style="border-top: 4px solid #ef4444;"><div class="kpi-label" style="color:#ef4444;">Critical Events</div><div class="kpi-value">${stats.critical}</div></div>
                         <div class="kpi-card" style="border-top: 4px solid #f97316;"><div class="kpi-label" style="color:#f97316;">High Risk Events</div><div class="kpi-value">${stats.high}</div></div>
-                        <div class="kpi-card" style="border-top: 4px solid #eab308;"><div class="kpi-label" style="color:#eab308;">Risky IPs Identified</div><div class="kpi-value">${stats.ipsNeedingAction}</div></div>
+                        <div class="kpi-card" style="border-top: 4px solid #eab308;"><div class="kpi-label" style="color:#eab308;">Medium Events</div><div class="kpi-value">${stats.medium}</div></div>
                         <div class="kpi-card" style="border-top: 4px solid #10b981;"><div class="kpi-label" style="color:#10b981;">Total Analyzed Logs</div><div class="kpi-value">${stats.total}</div></div>
                     </div>
                     
@@ -1348,8 +1260,245 @@ const ReportCenter = ({ logs, userProfile }) => {
 
     return (
         <div className="max-w-4xl mx-auto grid grid-cols-1 md:grid-cols-2 gap-6">
-            <Card><h2 className="text-xl font-bold text-white mb-2">Raw Data Export (Excel Compatible)</h2><p className="text-slate-400 mb-6 text-sm">Download full dataset in Tab-Separated format (`.csv`) for reliable import into Excel.</p><button onClick={handleExcelExport} className="w-full border border-cyan-500 text-cyan-400 hover:bg-cyan-500 hover:text-white py-2 rounded transition-colors font-mono uppercase text-sm flex items-center justify-center gap-2">Download CSV <Download className="w-4 h-4"/></button></Card>
+            <Card><h2 className="text-xl font-bold text-white mb-2">Raw Data Export (Excel)</h2><p className="text-slate-400 mb-6 text-sm">Download full dataset compatible with external SIEM tools in structured table format.</p><button onClick={handleExcelExport} className="w-full border border-cyan-500 text-cyan-400 hover:bg-cyan-500 hover:text-white py-2 rounded transition-colors font-mono uppercase text-sm flex items-center justify-center gap-2">Download XLSX <Download className="w-4 h-4"/></button></Card>
             <Card><h2 className="text-xl font-bold text-white mb-2">Executive Brief (Enhanced)</h2><p className="text-slate-400 mb-6 text-sm">Generate professional PDF report with forecasts, asset scores, and remediation steps.</p><button onClick={handlePrint} className="w-full border border-blue-500 text-blue-400 hover:bg-blue-500 hover:text-white py-2 rounded transition-colors font-mono uppercase text-sm flex items-center justify-center gap-2">Generate Report <Download className="w-4 h-4"/></button></Card>
+        </div>
+    );
+};
+
+const AICopilot = ({ logs }) => {
+    const [analysis, setAnalysis] = useState(null);
+    const handleAnalyze = async () => { await new Promise(r => setTimeout(r, 1500)); setAnalysis(generateAIAnalysis(logs)); };
+    useEffect(() => { handleAnalyze(); }, [logs.length]);
+
+    if (!analysis) return <Card><div className="text-center p-8 animate-pulse text-cyan-400">Initializing AI Neural Core...</div></Card>;
+
+    return (
+        <div className="space-y-6">
+            <Card>
+                <h2 className="text-xl font-bold text-white mb-4 flex gap-2"><Lightbulb className="w-5 h-5 text-cyan-400"/> AI Copilot</h2>
+                <div className="space-y-4">
+                    <div className="bg-slate-800/50 p-4 rounded border border-slate-700">
+                        <h3 className="text-sm font-bold text-cyan-400 uppercase tracking-wider mb-2">Executive Situation Report</h3>
+                        <p className="text-slate-300 text-sm leading-relaxed">{analysis.summary}</p>
+                    </div>
+                    
+                    <div className="grid grid-cols-2 gap-4">
+                        <div className="bg-slate-800/50 p-4 rounded border border-slate-700">
+                            <h3 className="text-xs font-bold text-purple-400 uppercase mb-2">Dominant Vector</h3>
+                            <div className="text-2xl font-mono text-white">{analysis.dominantThreat}</div>
+                        </div>
+                        <div className="bg-slate-800/50 p-4 rounded border border-slate-700">
+                            <h3 className="text-xs font-bold text-emerald-400 uppercase mb-2">Forecast</h3>
+                            <p className="text-xs text-slate-400">{analysis.forecast}</p>
+                        </div>
+                    </div>
+
+                    <div className="bg-slate-800/50 p-4 rounded border border-slate-700">
+                        <h3 className="text-sm font-bold text-yellow-400 uppercase tracking-wider mb-3">Strategic Remediation Plan</h3>
+                        <ul className="space-y-2">
+                            {analysis.actionableSteps.map((s, i) => (
+                                <li key={i} className="flex gap-3 text-sm text-slate-300 items-start">
+                                    <CheckCircle className="w-4 h-4 text-cyan-500 mt-0.5 shrink-0"/>
+                                    {s}
+                                </li>
+                            ))}
+                        </ul>
+                    </div>
+                </div>
+            </Card>
+        </div>
+    );
+};
+
+const IngestCenter = ({ onIngest }) => {
+    const [status, setStatus] = useState('');
+    const [livePastedData, setLivePastedData] = useState('');
+    const fileInputRef = useRef(null);
+
+    const handleFiles = async (files) => {
+        setStatus(`Processing ${files.length} file(s)...`);
+        const promises = Array.from(files).map(f => new Promise((res) => {
+            const r = new FileReader(); r.onload = e => { onIngest(e.target.result, f.name); res(); }; r.readAsText(f);
+        }));
+        await Promise.all(promises);
+        setStatus('Ingestion Complete.'); setTimeout(() => setStatus(''), 3000);
+    };
+
+    const handlePasteIngest = () => {
+        if(livePastedData.trim()) {
+            onIngest(livePastedData, 'Live Terminal Paste');
+            setStatus(`Ingested ${livePastedData.split(/\r?\n/).length} lines from paste.`);
+            setLivePastedData('');
+            setTimeout(() => setStatus(''), 3000);
+        }
+    };
+
+    return (
+        <div className="max-w-4xl mx-auto space-y-6">
+            {status && <div className="bg-emerald-500/20 border border-emerald-500/50 text-emerald-400 p-4 rounded animate-pulse flex justify-center gap-2"><RefreshCw className="w-5 h-5"/>{status}</div>}
+
+            {/* File Upload Section */}
+            <Card className="text-center py-16 border-dashed border-2 border-slate-700 bg-slate-900/30 hover:bg-slate-900/50 transition-colors">
+                <input ref={fileInputRef} type="file" multiple className="hidden" onChange={e => handleFiles(e.target.files)} accept=".log,.txt,.csv,.json" />
+                <div className="cursor-pointer" onClick={() => fileInputRef.current.click()}>
+                    <FileText className="w-10 h-10 text-cyan-400 mx-auto mb-6" />
+                    <h2 className="text-2xl font-bold text-white mb-2">Upload Logs</h2>
+                    <p className="text-slate-400 text-sm">Supports .log, .txt, .csv, and .json file formats.</p>
+                    <button type="button" className="bg-cyan-600 hover:bg-cyan-500 text-white px-8 py-3 rounded mt-4">Select Files</button>
+                </div>
+            </Card>
+
+            {/* Live Data Paste Section */}
+            <Card>
+                <h2 className="text-xl font-bold text-white mb-4 flex items-center gap-2"><Terminal className="w-5 h-5 text-yellow-400"/> Live Terminal Paste</h2>
+                <textarea 
+                    className="w-full h-40 bg-slate-900 border border-slate-700 rounded p-4 text-sm font-mono text-white placeholder-slate-600 focus:ring-cyan-500 focus:border-cyan-500 resize-none"
+                    placeholder="Paste raw log lines, database dumps, or JSON arrays here (e.g., '192.168.1.10 - failed login for user: admin')"
+                    value={livePastedData}
+                    onChange={e => setLivePastedData(e.target.value)}
+                />
+                <button 
+                    onClick={handlePasteIngest} 
+                    disabled={livePastedData.trim().length === 0}
+                    className="w-full bg-yellow-600 hover:bg-yellow-500 text-white font-bold py-2 rounded mt-4 uppercase text-sm disabled:opacity-50"
+                >
+                    Ingest & Analyze
+                </button>
+            </Card>
+        </div>
+    );
+};
+
+
+const LiveTerminal = ({ logs, onIngest }) => {
+    const [input, setInput] = useState('');
+    const bottomRef = useRef(null);
+    // We reverse logs here since they are fetched chronologically (oldest first)
+    const reversedLogs = logs.slice().reverse().slice(0, DISPLAY_LOGS_LIMIT); // Apply display limit
+
+    useEffect(() => { 
+        // Only scroll if we are not actively loading a huge amount of logs
+        if (logs.length < 5000) {
+            bottomRef.current?.scrollIntoView({ behavior: 'smooth' }); 
+        }
+    }, [logs.length]);
+    
+    const handleKeyDown = (e) => {
+        if (e.key === 'Enter') {
+            e.preventDefault(); // Prevent default form submission behavior
+            if (onIngest && input.trim()) {
+                onIngest(input, 'Terminal');
+                setInput('');
+            }
+        }
+    };
+
+    return (
+        <div className="flex flex-col h-[calc(100vh-140px)] gap-4">
+            <Card className="flex-1 bg-black font-mono text-xs p-0 overflow-hidden flex flex-col border-slate-800">
+                <div className="bg-slate-900 p-2 border-b border-slate-800 flex gap-2"><div className="w-3 h-3 rounded-full bg-red-500"></div><div className="w-3 h-3 rounded-full bg-yellow-500"></div><div className="w-3 h-3 rounded-full bg-green-500"></div></div>
+                <div className="flex-1 overflow-y-auto p-4 space-y-1">
+                    <p className="text-yellow-400 text-xs mb-2 p-2 bg-yellow-900/10 border border-yellow-500/30 rounded sticky top-0 z-10">
+                        Performance Notice: Displaying only the **{reversedLogs.length}** most recent live log lines to maintain stability.
+                    </p>
+                    {reversedLogs.map(l => (
+                        <div key={l.id} className="flex gap-2 text-wrap break-words">
+                            <span className="text-slate-500 shrink-0">[{new Date(l.timestamp).toLocaleTimeString()}]</span>
+                            <span className={l.severity === 'Critical' ? 'text-red-500 shrink-0' : 'text-blue-500 shrink-0'}>{l.severity.toUpperCase()}</span>
+                            <span className="text-slate-300">{l.raw}</span>
+                        </div>
+                    ))}
+                    <div ref={bottomRef} />
+                </div>
+                <div className="p-2 bg-slate-900 border-t border-slate-800 flex gap-2">
+                    <span className="text-cyan-500 shrink-0">sentinel@terminal:~$</span>
+                    <input 
+                        className="w-full bg-transparent text-white outline-none" 
+                        value={input} 
+                        onChange={e => setInput(e.target.value)} 
+                        onKeyDown={handleKeyDown} 
+                        placeholder="Type a log line and press Enter to ingest..."
+                    />
+                </div>
+            </Card>
+        </div>
+    );
+};
+
+const AutomationCenter = ({ rules, userId }) => {
+    const [newRule, setNewRule] = useState({ name: '', conditionField: 'severity', conditionValue: 'Critical', action: 'BLOCK_IP' });
+    const [logs, setLogs] = useState([]);
+    useEffect(() => { 
+        if(userId) { 
+            // Query for automation logs (actions taken)
+            const q = query(collection(db, 'artifacts', appId, 'users', userId, 'automation_logs'), orderBy('timestamp', 'desc')); 
+            return onSnapshot(q, s => setLogs(s.docs.map(d => d.data()))); 
+        }
+    }, [userId]);
+
+    const addRule = async () => { 
+        if(newRule.name.trim() === '') return;
+        await addDoc(getUserRulesCollectionRef(userId), { ...newRule, createdAt: serverTimestamp() }); 
+        setNewRule({ ...newRule, name: '' }); 
+    };
+    const deleteRule = async (id) => deleteDoc(doc(getUserRulesCollectionRef(userId), id));
+    
+    return (
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            <div className="lg:col-span-2 space-y-6">
+                <Card>
+                    <h3 className="text-white font-bold mb-4 flex items-center gap-2"><Check className="w-4 h-4 text-emerald-400"/> Active Rules</h3>
+                    <div className="space-y-2 max-h-60 overflow-y-auto pr-2">
+                        {rules && rules.length > 0 ? rules.map(r => (
+                            <div key={r.id} className="bg-slate-800/50 p-3 rounded flex justify-between items-center text-sm border-l-4 border-cyan-600">
+                                <span className="text-white font-medium">{r.name}: <span className="text-slate-400 font-normal">IF {r.conditionField} == {r.conditionValue} THEN {r.action}</span></span>
+                                <button onClick={() => deleteRule(r.id)} title="Delete Rule" className="p-1 rounded hover:bg-red-500/20 text-slate-500 hover:text-red-400 shrink-0"><Trash2 className="w-4 h-4"/></button>
+                            </div>
+                        )) : <div className="text-slate-500 text-sm italic p-3">No active rules defined.</div>}
+                    </div>
+                </Card>
+
+                <Card>
+                    <h3 className="text-white font-bold mb-4 flex items-center gap-2"><Plus className="w-4 h-4 text-yellow-400"/> Define New Rule</h3>
+                    <div className="space-y-4">
+                        <input className="bg-slate-900 border border-slate-700 rounded p-2 text-white w-full" placeholder="Rule Name (e.g., Critical SQLi Block)" value={newRule.name} onChange={e => setNewRule({...newRule, name: e.target.value})} required />
+                        <div className="grid grid-cols-3 gap-4">
+                            <select className="bg-slate-900 border border-slate-700 rounded p-2 text-white" value={newRule.conditionField} onChange={e => setNewRule({...newRule, conditionField: e.target.value})}>
+                                <option value="severity">Field: Severity</option>
+                                <option value="type">Field: Threat Type</option>
+                                <option value="ip">Field: Source IP</option>
+                            </select>
+                            <select className="bg-slate-900 border border-slate-700 rounded p-2 text-white" value={newRule.conditionValue} onChange={e => setNewRule({...newRule, conditionValue: e.target.value})}>
+                                <option value="Critical">Value: Critical</option>
+                                <option value="High">Value: High</option>
+                                <option value="SQL Injection">Value: SQL Injection</option>
+                                <option value="Brute Force Attempt">Value: Brute Force</option>
+                            </select>
+                            <select className="bg-slate-900 border border-slate-700 rounded p-2 text-white" value={newRule.action} onChange={e => setNewRule({...newRule, action: e.target.value})}>
+                                <option value="BLOCK_IP">Action: BLOCK IP</option>
+                                <option value="NOTIFY_EMAIL">Action: NOTIFY EMAIL</option>
+                                <option value="ISOLATE_ASSET">Action: ISOLATE ASSET</option>
+                            </select>
+                        </div>
+                        <button onClick={addRule} className="w-full bg-cyan-600 hover:bg-cyan-500 text-white font-bold py-2 rounded flex items-center justify-center gap-2">
+                            <Zap className="w-4 h-4"/> Deploy Rule
+                        </button>
+                    </div>
+                </Card>
+            </div>
+
+            <Card className="lg:col-span-1">
+                <h3 className="text-white font-bold mb-4 flex items-center gap-2"><Clock className="w-4 h-4 text-slate-400"/> Automation Log</h3>
+                <div className="space-y-2 max-h-96 overflow-y-auto">
+                    {logs.length > 0 ? logs.map((l, i) => (
+                        <div key={i} className="text-xs border-l-2 border-cyan-500 pl-3 py-1 text-slate-400">
+                            <span className="font-mono text-xs mr-2 text-slate-600">[{new Date(l.timestamp?.toDate ? l.timestamp.toDate() : Date.now()).toLocaleTimeString()}]</span>
+                            <span className="text-white font-medium">{l.ruleName}</span> triggered on <span className="font-mono">{l.target}</span>.
+                        </div>
+                    )) : <div className="text-slate-500 text-sm italic">Automation engine currently idle.</div>}
+                </div>
+            </Card>
         </div>
     );
 };
